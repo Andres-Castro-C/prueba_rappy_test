@@ -1,0 +1,6 @@
+.venv/
+data/
+*.csv
+*.p8
+.env
+__pycache__/
