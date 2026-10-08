@@ -1,4 +1,5 @@
 import sys
+import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,6 +7,38 @@ from unittest.mock import Mock, patch
 
 from scripts import run_sql, upload_dataset
 from scripts.runtime_logging import configure_logging
+
+
+class AuxiliarySqlTests(unittest.TestCase):
+    def test_defines_clean_and_aggregate_tables_without_modifying_raw(self):
+        sql_path = (
+            Path(__file__).resolve().parent.parent
+            / "sql"
+            / "05_create_auxiliary_tables.sql"
+        )
+        sql = sql_path.read_text(encoding="utf-8")
+
+        expected_tables = (
+            "STAGING.GROUPS_CLEAN",
+            "STAGING.EVENTS_CLEAN",
+            "AUX.GROUPS_BY_CITY_CATEGORY",
+        )
+        for table_name in expected_tables:
+            self.assertIn(f"CREATE OR REPLACE TABLE {table_name} AS", sql)
+
+        self.assertIn("TRY_TO_TIMESTAMP_NTZ", sql)
+        self.assertIn("TRY_TO_DECIMAL", sql)
+        self.assertIn("COUNT(*)::NUMBER(38, 0) AS event_count", sql)
+        self.assertIn("SUM(COALESCE(g.member_count, 0))", sql)
+        self.assertIn("LEFT JOIN event_metrics", sql)
+        self.assertIsNone(
+            re.search(
+                r"\b(?:CREATE|DROP|ALTER|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+"
+                r"(?:TABLE\s+)?RAW_DATA\.",
+                sql,
+                re.IGNORECASE,
+            )
+        )
 
 
 class UploadDatasetTests(unittest.TestCase):

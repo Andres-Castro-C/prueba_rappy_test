@@ -30,7 +30,7 @@ Prueba técnica de Data Engineer. El proyecto carga el dataset **Meetup (Kaggle)
 |---|-----------|--------|
 | 1 | Cuenta/base de datos Snowflake | ✅ Cuenta y conexión a la base de prueba verificadas; confirmar plan Free/Trial en Snowsight |
 | 2 | Carga del dataset Meetup en Snowflake | ✅ Nueve CSV en el stage y nueve tablas RAW con conteos esperados |
-| 3 | Tablas físicas auxiliares | ⏳ Pendiente |
+| 3 | Tablas físicas auxiliares | ✅ Tres tablas creadas y validadas en Snowflake |
 | 4 | DAG de Airflow cada 15 min (`MERGE`, `CREATE`, `REPLACE`) | ⏳ Pendiente |
 | 5 | Alertas de Airflow hacia Slack | ⏳ Pendiente |
 | 6 | Exportación de tablas procesadas a S3 | ⏳ Pendiente |
@@ -44,7 +44,7 @@ Prueba técnica de Data Engineer. El proyecto carga el dataset **Meetup (Kaggle)
 flowchart LR
     A[CSV Meetup<br/>Kaggle] -->|PUT| B[(Stage interno<br/>STG_MEETUP)]
     B -->|COPY INTO| C[RAW_DATA<br/>9 tablas]
-    C -->|MERGE / CREATE OR REPLACE| D[Tablas auxiliares<br/>pendiente]
+    C -->|CREATE OR REPLACE| D[STAGING y AUX<br/>3 tablas]
     D -->|COPY INTO s3://| E[(Bucket S3<br/>pendiente)]
     F{{Airflow DAG<br/>cada 15 min<br/>pendiente}} -.orquesta.-> C
     F -.orquesta.-> D
@@ -57,10 +57,12 @@ flowchart LR
 | Esquema | Propósito | Estado |
 |---------|-----------|--------|
 | `RAW_DATA` | Datos tal cual vienen del CSV, todas las columnas como `VARCHAR` | ✅ |
-| `STAGING` | Datos limpios y con tipos correctos | ⏳ |
-| `AUX` / `CORE` | Tablas auxiliares y agregadas, mantenidas con `MERGE` | ⏳ |
+| `STAGING` | Datos de grupos y eventos limpios y tipados | ✅ `GROUPS_CLEAN` (16,330 filas), `EVENTS_CLEAN` (563 filas) |
+| `AUX` | Resumen de grupos, miembros asociados y actividad de eventos por ciudad/categoría | ✅ `GROUPS_BY_CITY_CATEGORY` (129 filas) |
 
 **Validación en `RAPPI_MEETUP_TEST` (7 de octubre de 2026):** `meetup_test_etl_conn` conecta con estado `OK`; los nueve archivos están en `STG_MEETUP`, y las nueve tablas RAW tienen los conteos esperados que se muestran en [Validación](#validación). Esto valida los puntos 1 (cuenta/conexión disponibles) y 2 de la prueba. El plan gratuito/trial se debe confirmar en la página de facturación/uso de Snowsight; el resultado del CLI no informa el tipo de plan.
+
+**Punto 3:** [sql/05_create_auxiliary_tables.sql](./sql/05_create_auxiliary_tables.sql) crea tres tablas analíticas en `STAGING` y `AUX`. Tras conceder a `ETL_ROLE` el permiso `CREATE SCHEMA`, la ejecución terminó correctamente. Se validaron los conteos y la cobertura de grupos/eventos (ver [Punto 3](#punto-3-tablas-físicas-auxiliares)).
 
 ---
 
@@ -357,7 +359,39 @@ La carga nueva **no necesita** `sql/04_fix_encoding_and_reload.sql`: es solo una
 
 - **Punto 1:** la cuenta y la conexión a `RAPPI_MEETUP_TEST` están verificadas. Confirma en Snowsight que la cuenta sigue en modalidad gratuita/trial, ya que Snowflake CLI no muestra la modalidad del plan.
 - **Punto 2:** validado: los nueve CSV están en el stage y las nueve tablas RAW tienen los conteos esperados; la carga terminó exitosamente el 7 de octubre de 2026.
-- **Punto 3:** no todavía. Las tablas `_LOAD` no cuentan como tablas auxiliares de análisis; son objetos técnicos que se borran al completar la carga. El punto 3 requiere diseñar y crear tablas físicas nuevas para análisis/procesamiento, que se agregarán después sobre la capa RAW.
+- **Punto 3:** validado en Snowflake: 16,330 grupos limpios, 563 eventos limpios y 129 filas agregadas; todos los grupos están en el resumen y todos los eventos corresponden a un grupo.
+
+---
+
+## Punto 3: tablas físicas auxiliares
+
+No necesitamos crear una copia física de cada CSV. El alcance inicial se limita a tres tablas que convierten los campos utilizados para el análisis y preparan un resumen concreto:
+
+| Tabla | Para qué sirve |
+|-------|----------------|
+| `STAGING.GROUPS_CLEAN` | Una fila por grupo, con IDs, miembros, rating, fecha y coordenadas convertidos a tipos numéricos/fecha. Enriquece ciudad y categoría con sus tablas RAW. |
+| `STAGING.EVENTS_CLEAN` | Una fila por evento, con IDs, fechas, RSVP y rating convertidos para agregarlos sin repetir conversiones. |
+| `AUX.GROUPS_BY_CITY_CATEGORY` | Resume por ciudad y categoría cantidad de grupos, suma de miembros declarados, rating promedio y actividad de eventos/RSVP. |
+
+Con estas tres tablas se pueden responder preguntas como “¿qué ciudades/categorías tienen más grupos?”, “¿cuántos miembros declaran esos grupos?” y “¿dónde se concentran los eventos y sus RSVP?”. Los dos pasos `STAGING` limpian y tipan los datos una sola vez; `AUX` entrega el resumen listo para consultar o exportar.
+
+**Cómo interpretar las métricas:** `members_across_groups` suma los miembros declarados por cada grupo; no representa personas únicas, ya que una persona podría pertenecer a varios grupos. `yes_rsvp_across_events` suma RSVP de eventos y tampoco es un conteo de personas únicas. Los resultados describen el snapshot histórico del dataset, no actividad en tiempo real.
+
+### Permisos para las tablas auxiliares
+
+El SQL necesita crear los esquemas `STAGING` y `AUX`. En la base de prueba, el primer intento se detuvo al no tener `ETL_ROLE` el permiso `CREATE SCHEMA`; un administrador lo concedió y después la creación de las tres tablas terminó correctamente. Para ejecutar el flujo en otra base/rol, un administrador debe conceder el permiso una sola vez:
+
+```sql
+GRANT CREATE SCHEMA ON DATABASE RAPPI_MEETUP_TEST TO ROLE ETL_ROLE;
+```
+
+Si el nombre de la base o rol es distinto, sustituirlo por los valores correctos. El rol también debe tener `USAGE` en la base y `USAGE` en `SNOWFLAKE_LEARNING_WH`. Luego verifica la conexión y ejecuta el SQL:
+
+```powershell
+python scripts/run_sql.py --connection meetup_test_etl_conn --file sql/05_create_auxiliary_tables.sql
+```
+
+El SQL usa `CREATE OR REPLACE TABLE ... AS SELECT`, por lo que una repetición reemplaza estas tres tablas derivadas; no modifica las nueve tablas RAW. La ejecución validada creó `STAGING.GROUPS_CLEAN` (16,330 filas), `STAGING.EVENTS_CLEAN` (563) y `AUX.GROUPS_BY_CITY_CATEGORY` (129). Se verificó además que los 16,330 grupos están cubiertos por el resumen, que sus IDs son distintos, y que los 563 eventos aparecen en el resumen y tienen un grupo asociado.
 
 ---
 
@@ -466,6 +500,7 @@ ORDER BY table_name, last_load_time DESC;
 | `Password is empty` | El asistente `snow connection add` dejó `externalbrowser` en el campo `host` | Recrear la conexión con flags explícitos y `--no-interactive` |
 | `390190 ... SAML Identity Provider` | El proveedor de identidad rechazó el inicio de sesión por navegador | Usa una conexión `SNOWFLAKE_JWT` de servicio si está configurada y autorizada para la base de prueba; de lo contrario, consulta al administrador |
 | `Could not use database "RAPPI_MEETUP_TEST"` | La base no existe o el rol de la conexión no tiene permiso de uso | Crear/verificar la base y el esquema; conceder `USAGE` al rol y volver a probar la conexión |
+| `ETL_ROLE must have CREATE SCHEMA granted on DATABASE RAPPI_MEETUP_TEST` | El rol no puede crear los esquemas `STAGING` y `AUX` | Un administrador ejecuta `GRANT CREATE SCHEMA ON DATABASE RAPPI_MEETUP_TEST TO ROLE ETL_ROLE` |
 | `Encoding mismatch detected` seguido de `Status: OK` | El CLI detectó que la codificación de la terminal y la configuración difieren | No bloqueó la conexión; confirma el resultado en la fila `Status` |
 | `No active warehouse selected in the current session` | Snowsight no tiene warehouse activo | Seleccionar el warehouse arriba a la derecha o `USE WAREHOUSE ...` |
 | `Failed to transfer ownership ... APPLYBUDGET` | Se intentó cambiar el dueño de la tabla | No es necesario: `ACCOUNTADMIN` hereda los privilegios por la jerarquía de roles |
@@ -491,7 +526,7 @@ Guardar en `docs/evidence/` y enlazar aquí:
 
 ## Próximos pasos
 
-1. **Tablas auxiliares:** capa `STAGING` con tipos correctos (conversión de fechas, coordenadas y números) y tablas agregadas en `AUX`, creadas con `CREATE OR REPLACE` y mantenidas con `MERGE`.
+1. **Punto 3 completado:** tablas auxiliares ejecutadas y validadas en `RAPPI_MEETUP_TEST`.
 2. **DAG de Airflow:** schedule `*/15 * * * *`, conexión a Snowflake por key-pair, tareas idempotentes y reintentos.
 3. **Alertas a Slack:** `on_failure_callback` con webhook o app de Slack; el secreto se guarda como Connection de Airflow.
 4. **Exportación a S3:** `COPY INTO 's3://...'` desde Snowflake mediante una *storage integration* (sin claves de AWS en texto plano).
