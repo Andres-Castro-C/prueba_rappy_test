@@ -12,7 +12,7 @@ Prueba técnica de Data Engineer. El proyecto carga el dataset **Meetup (Kaggle)
 4. [Estructura del repositorio](#estructura-del-repositorio)
 5. [Dataset](#dataset)
 6. [Requisitos previos](#requisitos-previos)
-7. [Configuración del entorno](#configuración-del-entorno)
+7. [Preparación desde cero (Windows)](#preparación-desde-cero-windows)
 8. [Seguridad y manejo de credenciales](#seguridad-y-manejo-de-credenciales)
 9. [Ejecución paso a paso](#ejecución-paso-a-paso)
 10. [Decisiones de diseño](#decisiones-de-diseño)
@@ -28,8 +28,8 @@ Prueba técnica de Data Engineer. El proyecto carga el dataset **Meetup (Kaggle)
 
 | # | Requisito | Estado |
 |---|-----------|--------|
-| 1 | Cuenta gratuita de Snowflake | ✅ Completado |
-| 2 | Carga del dataset Meetup en Snowflake | ✅ Completado (ver [hallazgos de calidad](#calidad-de-datos-hallazgos)) |
+| 1 | Cuenta/base de datos Snowflake | ✅ Cuenta y conexión a la base de prueba verificadas; confirmar plan Free/Trial en Snowsight |
+| 2 | Carga del dataset Meetup en Snowflake | ✅ Nueve CSV en el stage y nueve tablas RAW con conteos esperados |
 | 3 | Tablas físicas auxiliares | ⏳ Pendiente |
 | 4 | DAG de Airflow cada 15 min (`MERGE`, `CREATE`, `REPLACE`) | ⏳ Pendiente |
 | 5 | Alertas de Airflow hacia Slack | ⏳ Pendiente |
@@ -52,13 +52,15 @@ flowchart LR
     F -.alertas de fallo.-> G[Slack<br/>pendiente]
 ```
 
-**Capas en Snowflake** (base de datos `RAPPI_MEETUP_DB`):
+**Capas en Snowflake** (la base de datos se selecciona en la conexión; `RAPPI_MEETUP_DB` fue el nombre original de desarrollo):
 
 | Esquema | Propósito | Estado |
 |---------|-----------|--------|
 | `RAW_DATA` | Datos tal cual vienen del CSV, todas las columnas como `VARCHAR` | ✅ |
 | `STAGING` | Datos limpios y con tipos correctos | ⏳ |
 | `AUX` / `CORE` | Tablas auxiliares y agregadas, mantenidas con `MERGE` | ⏳ |
+
+**Validación en `RAPPI_MEETUP_TEST` (7 de octubre de 2026):** `meetup_test_etl_conn` conecta con estado `OK`; los nueve archivos están en `STG_MEETUP`, y las nueve tablas RAW tienen los conteos esperados que se muestran en [Validación](#validación). Esto valida los puntos 1 (cuenta/conexión disponibles) y 2 de la prueba. El plan gratuito/trial se debe confirmar en la página de facturación/uso de Snowsight; el resultado del CLI no informa el tipo de plan.
 
 ---
 
@@ -81,13 +83,18 @@ flowchart LR
 .
 ├── sql/
 │   ├── 01_setup_stage.sql              # File format y stage interno
-│   ├── 02_put_files.sql                # Subida de CSV al stage (PUT)
+│   ├── 02_verify_stage.sql             # Verifica los CSV subidos
 │   ├── 03_create_and_load_raw.sql      # Tablas RAW y COPY INTO
-│   └── 04_fix_encoding_and_reload.sql  # Recarga con manejo de caracteres inválidos
+│   └── 04_fix_encoding_and_reload.sql  # Reparación segura de cargas anteriores
+├── scripts/
+│   ├── upload_dataset.py               # Subida portable de CSV al stage
+│   ├── run_sql.py                      # Ejecuta SQL y registra resultados/errores
+│   └── runtime_logging.py              # Configuración común de logs
 ├── gen_keys.py                         # Genera el par de claves RSA (la privada NO se versiona)
 ├── dags/                               # DAG de Airflow (pendiente)
 ├── docs/evidence/                      # Capturas y salidas de validación
 ├── data/                               # CSV originales (ignorado por Git)
+├── logs/                               # Logs locales (ignorados por Git)
 ├── .gitignore
 └── README.md
 ```
@@ -96,9 +103,9 @@ flowchart LR
 
 ## Dataset
 
-Dataset **Meetup** de Kaggle: `<URL del dataset en Kaggle>`.
+Dataset **Meetup** de Kaggle: <https://www.kaggle.com/megelon/meetup>.
 
-Los CSV se colocan en la carpeta `data/`, que **no se versiona** (GitHub rechaza archivos de más de 100 MB y `members.csv` pesa 1,2 GB).
+Los CSV se colocan en la carpeta `data/`, que **no se versiona** (GitHub rechaza archivos de más de 100 MB y `members.csv` pesa 1,2 GB). Cada persona debe descargar el dataset desde Kaggle, crear `data/` si no existe y extraer ahí los nueve CSV; el cargador comprueba que estén todos antes de conectarse.
 
 | Archivo | Tamaño | Filas leídas | Tabla destino |
 |---------|--------|--------------|---------------|
@@ -116,133 +123,251 @@ Los CSV se colocan en la carpeta `data/`, que **no se versiona** (GitHub rechaza
 
 ## Requisitos previos
 
-- Cuenta de Snowflake (el trial gratuito de 30 días es suficiente).
-- Python 3.10 o superior.
-- Git.
-- Los CSV del dataset descargados en `data/`.
-- Para las etapas siguientes: Airflow, un workspace de Slack y una cuenta de AWS con un bucket S3.
+Para completar esta primera carga necesitas:
+
+1. Una cuenta de Snowflake con una base de datos existente.
+2. Un warehouse activo o permiso para usar uno.
+3. Python 3.10 o posterior.
+4. Snowflake CLI instalado y una conexión que pueda acceder a esa base de datos.
+5. Los nueve CSV del dataset Meetup descargados de Kaggle.
+
+**No necesitas crear otra base de datos** si ya tienes una. El pipeline usa la base de datos configurada en la conexión Snowflake y crea los objetos dentro del esquema `RAW_DATA`.
 
 ---
 
-## Configuración del entorno
+## Preparación desde cero (Windows)
 
-### 1. Entorno virtual e instalación
+Abre PowerShell en la carpeta del proyecto. Si descargaste el repositorio por Git:
 
 ```powershell
-python -m venv .venv
+git clone https://github.com/Andres-Castro-C/prueba_rappy_test.git
+Set-Location .\prueba_rappy_test
+```
+
+Si ya estás en la carpeta del proyecto, solo ejecuta `Set-Location` con la ruta donde lo guardaste.
+
+### 1. Crear y activar el entorno Python
+
+```powershell
+py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install snowflake-cli
+python -m pip install snowflake-cli cryptography
 ```
 
-### 2. Variables de entorno para Windows
-
-Si Python se instaló desde la Microsoft Store, el CLI puede fallar al escribir su configuración (ver [problemas encontrados](#problemas-encontrados-y-soluciones)). Define estas variables en cada ventana de terminal:
+Si PowerShell dice que no permite activar scripts, ejecuta una sola vez:
 
 ```powershell
-$env:SNOWFLAKE_HOME = "$HOME\.snowflake"
-$env:PYTHONUTF8 = "1"
-New-Item -ItemType Directory -Force $env:SNOWFLAKE_HOME | Out-Null
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-### 3. Par de claves RSA
-
-La cuenta trial no tiene SSO, así que `externalbrowser` no funciona. Se usa autenticación por **key-pair**, que además es la que necesita Airflow.
+Confirma que Python y Snowflake CLI están instalados:
 
 ```powershell
-python gen_keys.py
+python --version
+snow --version
 ```
 
-El script guarda la clave privada en `~/.snowflake/keys/rsa_key.p8` (fuera del repositorio) e imprime la clave pública, que se registra en Snowflake en el siguiente paso.
+### 2. Descargar y colocar los archivos de datos
 
-### 4. Rol y usuario de servicio en Snowflake
+1. Descarga el dataset desde <https://www.kaggle.com/megelon/meetup>.
+2. Extrae el ZIP.
+3. En la carpeta del proyecto, crea `data` si no existe: `New-Item -ItemType Directory -Force data`.
+4. Copia los nueve CSV directamente a `data` (no dejes los CSV dentro de otra subcarpeta).
 
-Ejecutar en un worksheet de Snowsight con el rol `ACCOUNTADMIN` y **Run all** (Ctrl+Shift+Enter). Sustituir `<CLAVE_PUBLICA>` por la salida del script anterior:
-
-```sql
-USE ROLE ACCOUNTADMIN;
-
-CREATE ROLE IF NOT EXISTS ETL_ROLE;
-GRANT USAGE ON WAREHOUSE SNOWFLAKE_LEARNING_WH TO ROLE ETL_ROLE;
-GRANT ALL ON DATABASE RAPPI_MEETUP_DB TO ROLE ETL_ROLE;
-GRANT ALL ON ALL SCHEMAS IN DATABASE RAPPI_MEETUP_DB TO ROLE ETL_ROLE;
-GRANT ALL ON ALL TABLES IN SCHEMA RAPPI_MEETUP_DB.RAW_DATA TO ROLE ETL_ROLE;
-GRANT ALL ON FUTURE TABLES IN SCHEMA RAPPI_MEETUP_DB.RAW_DATA TO ROLE ETL_ROLE;
-
-CREATE USER IF NOT EXISTS SVC_ETL
-  TYPE = SERVICE
-  DEFAULT_ROLE = ETL_ROLE
-  DEFAULT_WAREHOUSE = SNOWFLAKE_LEARNING_WH
-  RSA_PUBLIC_KEY = '<CLAVE_PUBLICA>';
-
-GRANT ROLE ETL_ROLE TO USER SVC_ETL;
--- Permite que ACCOUNTADMIN vea y administre lo que cree ETL_ROLE
-GRANT ROLE ETL_ROLE TO ROLE ACCOUNTADMIN;
-```
-
-### 5. Conexión del CLI
+Verifica que estén los nueve:
 
 ```powershell
-snow connection add --connection-name etl_conn `
-  --account <ORG>-<CUENTA> `
+Get-ChildItem .\data\*.csv | Select-Object Name, Length
+```
+
+Deben aparecer `categories.csv`, `cities.csv`, `events.csv`, `groups.csv`, `groups_topics.csv`, `members.csv`, `members_topics.csv`, `topics.csv` y `venues.csv`. `members.csv` es grande; la subida puede tardar.
+
+### 3. Configurar la conexión de Snowflake
+
+No reemplaces la conexión que apunta a tu base de datos actual. Usa una conexión aparte llamada `meetup_test_conn`, que apunte a la base de prueba `RAPPI_MEETUP_TEST`. Así podrás probar el flujo sin cambiar la conexión original.
+
+Primero revisa las conexiones existentes:
+
+```powershell
+snow connection list
+```
+
+Si `meetup_test_conn` ya aparece, **no vuelvas a crearla**. Comprueba que el listado muestre `database: RAPPI_MEETUP_TEST`, `schema: RAW_DATA`, `authenticator: externalbrowser`, el warehouse esperado y el rol autorizado. Si los valores son correctos, continúa con `snow connection test -c meetup_test_conn`.
+
+Solo si `meetup_test_conn` no aparece, créala con este comando. Reemplaza los valores entre `< >` por los de tu cuenta:
+
+```powershell
+snow connection add --connection-name meetup_test_conn `
+  --account <IDENTIFICADOR_DE_CUENTA> `
+  --user <USUARIO_SNOWFLAKE> `
+  --authenticator externalbrowser `
+  --role <ROL_CON_PERMISOS> `
+  --warehouse <WAREHOUSE> `
+  --database RAPPI_MEETUP_TEST `
+  --schema RAW_DATA `
+  --no-interactive
+```
+
+Usa estos valores:
+
+- `<IDENTIFICADOR_DE_CUENTA>` y `<USUARIO_SNOWFLAKE>`: los valores de tu conexión actual.
+- `<ROL_CON_PERMISOS>`: un rol que pueda usar el warehouse y crear tablas, stages y formatos en `RAPPI_MEETUP_TEST.RAW_DATA`.
+- `<WAREHOUSE>`: el warehouse de tu conexión actual.
+
+En el caso de una conexión de usuario con inicio de sesión por navegador, `--authenticator externalbrowser` es el parámetro correcto. **No escribas `--host externalbrowser`**: eso guarda `externalbrowser` como host, no como autenticador. No pegues el bloque TOML `[connections...]` en PowerShell; el comando de arriba crea la entrada correctamente.
+
+Después comprueba que la conexión nueva aparece y que realmente apunta a la base de prueba:
+
+```powershell
+snow connection list
+snow connection test -c meetup_test_conn
+```
+
+El navegador puede abrirse para iniciar sesión. En el listado, comprueba que `meetup_test_conn` tiene `authenticator: externalbrowser`, `database: RAPPI_MEETUP_TEST` y el warehouse esperado. El aviso `Encoding mismatch detected` no significa por sí mismo que la conexión haya fallado; el resultado de `snow connection test` es el que se debe comprobar.
+
+Si la conexión existe, pero apunta a otra base o tiene parámetros equivocados, elimina **solo** la conexión de prueba y vuelve a crearla. Este comando no borra ninguna base, tabla ni dato de Snowflake:
+
+```powershell
+snow connection remove meetup_test_conn
+```
+
+Confirma la eliminación si CLI lo pregunta, ejecuta el comando `snow connection add` de arriba y vuelve a probarla. No elimines `meetup_conn`, `etl_conn` ni `my_example_connection`.
+
+Si `snow connection test` muestra `390190 ... SAML Identity Provider`, el proveedor de identidad rechazó el inicio de sesión por navegador. No repitas `snow connection add`: la conexión ya está guardada y el error no se arregla cambiando el nombre. Usa otro método de autenticación permitido por tu cuenta. En este proyecto ya existe `etl_conn`, configurada con el usuario de servicio `SVC_ETL`, autenticación por clave y rol `ETL_ROLE`; puedes usar esa identidad para la prueba aislada, después de concederle acceso a la base de prueba como se explica abajo.
+
+Si el administrador ya registró en `SVC_ETL` la clave pública correspondiente a `~/.snowflake/keys/rsa_key.p8`, crea una conexión separada para la base de prueba:
+
+```powershell
+snow connection add --connection-name meetup_test_etl_conn `
+  --account <IDENTIFICADOR_DE_CUENTA> `
   --user SVC_ETL `
   --authenticator SNOWFLAKE_JWT `
   --private-key-file "$HOME\.snowflake\keys\rsa_key.p8" `
   --role ETL_ROLE `
   --warehouse SNOWFLAKE_LEARNING_WH `
-  --database RAPPI_MEETUP_DB `
+  --database RAPPI_MEETUP_TEST `
   --schema RAW_DATA `
   --no-interactive
-
-snow connection test -c etl_conn
 ```
 
-El identificador de cuenta se copia desde Snowsight (menú del perfil, *Account*, *Copy account identifier*). La prueba debe terminar con `Status: OK`.
+Si esa conexión ya existe, no intentes añadirla otra vez: revisa sus valores con `snow connection list`. Sustituye `<IDENTIFICADOR_DE_CUENTA>` y la ruta a la clave por los valores propios. La conexión local `etl_conn` solo está disponible si ya fue configurada en tu computadora; una persona que clone el repositorio debe pedir al administrador una identidad de servicio con autenticación por clave. Nunca compartas ni subas al repositorio el archivo de clave privada.
 
----
+### 4. Crear la base de prueba, el esquema y permisos
 
-## Seguridad y manejo de credenciales
+El error `Could not use database "RAPPI_MEETUP_TEST". Object does not exist, or operation cannot be performed` significa que la base no existe con ese nombre o que el rol no tiene acceso. En Snowsight, abre una worksheet con un rol administrador autorizado y ejecuta:
 
-- **Ninguna credencial se versiona.** `.gitignore` excluye `.venv/`, `data/`, `*.csv`, `*.p8`, `.env` y `__pycache__/`.
-- **Autenticación por key-pair** con un usuario de tipo `SERVICE` (`SVC_ETL`), sin contraseña.
-- **Mínimo privilegio:** el pipeline usa `ETL_ROLE`, con permisos solo sobre `RAPPI_MEETUP_DB` y el warehouse de trabajo, en lugar de `ACCOUNTADMIN`.
-- La clave privada vive fuera del repositorio. En Airflow se inyectará como secreto (Connection o variable de entorno), nunca dentro del código del DAG.
-- El warehouse tiene `AUTO_SUSPEND` corto para no consumir créditos del trial sin necesidad.
-
-`.gitignore` recomendado:
-
+```sql
+CREATE DATABASE IF NOT EXISTS RAPPI_MEETUP_TEST;
+CREATE SCHEMA IF NOT EXISTS RAPPI_MEETUP_TEST.RAW_DATA;
 ```
-.venv/
-data/
-*.csv
-*.p8
-.env
-__pycache__/
+
+Luego concede al rol `ETL_ROLE` los permisos necesarios. Si el warehouse tiene otro nombre, reemplaza `SNOWFLAKE_LEARNING_WH` por el suyo:
+
+```sql
+GRANT USAGE ON DATABASE RAPPI_MEETUP_TEST TO ROLE ETL_ROLE;
+GRANT USAGE ON WAREHOUSE SNOWFLAKE_LEARNING_WH TO ROLE ETL_ROLE;
+GRANT USAGE ON SCHEMA RAPPI_MEETUP_TEST.RAW_DATA TO ROLE ETL_ROLE;
+GRANT USAGE, CREATE TABLE, CREATE STAGE, CREATE FILE FORMAT
+  ON SCHEMA RAPPI_MEETUP_TEST.RAW_DATA TO ROLE ETL_ROLE;
 ```
+
+`CREATE DATABASE` requiere permiso administrativo; si no puedes ejecutarlo, pide a quien administre Snowflake que cree la base de prueba y aplique los `GRANT`. No ejecutes la carga en `RAPPI_MEETUP_DB` como alternativa.
+
+Después comprueba la conexión de nuevo:
+
+```powershell
+snow connection test -c meetup_test_etl_conn
+```
+
+La validación de esta prueba terminó con `Status: OK` y estos valores:
+
+| Campo | Valor |
+|-------|-------|
+| Connection name | `meetup_test_etl_conn` |
+| Account | Cuenta Snowflake del usuario (identificador omitido) |
+| User | `SVC_ETL` |
+| Role | `ETL_ROLE` |
+| Database | `RAPPI_MEETUP_TEST` |
+| Warehouse | `SNOWFLAKE_LEARNING_WH` |
+
+Esto confirma que Snowflake CLI puede autenticarse con key-pair y usar la base de prueba. No demuestra todavía que los archivos se hayan subido ni que las tablas RAW se hayan cargado; esos son los siguientes pasos. No uses `etl_conn` directamente para la carga: actualmente esa conexión apunta a `RAPPI_MEETUP_DB`, no a la base de prueba.
+
+El aviso `Encoding mismatch detected` puede aparecer antes del resultado. Si la tabla de conexión muestra `Status: OK`, ese aviso no impidió la conexión.
 
 ---
 
 ## Ejecución paso a paso
 
-Con la conexión `etl_conn` funcionando y los CSV en `data/`:
+Ejecuta cada comando desde la carpeta principal del proyecto y **espera a que termine antes de ejecutar el siguiente**. Después del error SAML, usa la conexión por clave `meetup_test_etl_conn` que acabas de crear. Si el inicio de sesión de navegador sí funciona en tu cuenta, también puedes usar `meetup_test_conn`. Si algo falla, revisa `logs/pipeline.log`, corrige el problema y vuelve a intentar ese mismo paso.
+
+Antes de conectarte a Snowflake, comprueba el código localmente:
 
 ```powershell
-# 1. File format y stage interno
-snow sql -c etl_conn -f sql/01_setup_stage.sql
-
-# 2. Subir los CSV al stage (PUT comprime a gzip automáticamente)
-snow sql -c etl_conn -f sql/02_put_files.sql
-
-# 3. Crear tablas RAW y cargar con COPY INTO
-snow sql -c etl_conn -f sql/03_create_and_load_raw.sql
-
-# 4. Recargar MEMBERS y TOPICS con manejo de caracteres inválidos
-snow sql -c etl_conn -f sql/04_fix_encoding_and_reload.sql
+python -m unittest discover -s tests -v
 ```
 
-> **No volver a ejecutar `01_setup_stage.sql` después del paso 2:** su `CREATE OR REPLACE STAGE` borraría los archivos ya subidos.
+El resultado debe terminar en `OK`. Si muestra `FAILED`, no continúes con la carga hasta revisar el error.
 
-Antes de ejecutar `02_put_files.sql`, ajustar las rutas absolutas de los `PUT` a la ubicación local del proyecto (con barras normales `/`, por ejemplo `file://C:/Users/.../data/members.csv`).
+### Paso 1: preparar el área de carga en Snowflake
+
+```powershell
+python scripts/run_sql.py --connection meetup_test_etl_conn --file sql/01_setup_stage.sql
+```
+
+Debe terminar con el mensaje `completed successfully`. Esto crea el formato CSV y el stage dentro de `RAW_DATA`. Se puede volver a ejecutar.
+
+### Paso 2: subir los nueve CSV
+
+```powershell
+python scripts/upload_dataset.py --connection meetup_test_etl_conn
+```
+
+Primero prueba la conexión y, si no funciona, se detiene sin intentar las cargas. Si la conexión funciona, debe reportar `Uploaded all 9 files successfully`. Si algún CSV falta, o Snowflake rechaza una subida, el programa intenta los demás archivos, guarda el error y devuelve un resultado de fallo al final. Corrige lo que indique el log antes de seguir.
+
+### Paso 3: comprobar que los archivos llegaron
+
+```powershell
+python scripts/run_sql.py --connection meetup_test_etl_conn --file sql/02_verify_stage.sql
+```
+
+Comprueba que el resultado de `LIST` muestre los nueve nombres de archivo.
+
+### Paso 4: cargar las nueve tablas RAW
+
+```powershell
+python scripts/run_sql.py --connection meetup_test_etl_conn --file sql/03_create_and_load_raw.sql
+```
+
+Las tablas `_LOAD` son auxiliares **temporales del proceso de carga**, no las tablas del requisito 3. Se usan para preparar los CSV sin borrar primero las tablas RAW existentes. Después de que las nuevas cargas se intercambian correctamente, el script elimina las `_LOAD`; al final deben quedar las nueve tablas RAW, sin las nueve `_LOAD`.
+
+Verifica que el resultado final muestre conteos similares a los de la sección [Validación](#validación) y que el esquema contenga las nueve tablas RAW.
+
+### Paso 5: revisar resultados y log
+
+Abre Snowsight y confirma que las tablas están en `TU_BASE_DE_DATOS.RAW_DATA`. Para leer el log desde PowerShell:
+
+```powershell
+Get-Content .\logs\pipeline.log -Tail 100
+```
+
+La carga nueva **no necesita** `sql/04_fix_encoding_and_reload.sql`: es solo una reparación de tablas antiguas.
+
+### ¿Esto completa los puntos de la prueba?
+
+- **Punto 1:** la cuenta y la conexión a `RAPPI_MEETUP_TEST` están verificadas. Confirma en Snowsight que la cuenta sigue en modalidad gratuita/trial, ya que Snowflake CLI no muestra la modalidad del plan.
+- **Punto 2:** validado: los nueve CSV están en el stage y las nueve tablas RAW tienen los conteos esperados; la carga terminó exitosamente el 7 de octubre de 2026.
+- **Punto 3:** no todavía. Las tablas `_LOAD` no cuentan como tablas auxiliares de análisis; son objetos técnicos que se borran al completar la carga. El punto 3 requiere diseñar y crear tablas físicas nuevas para análisis/procesamiento, que se agregarán después sobre la capa RAW.
+
+---
+
+## Seguridad y manejo de credenciales
+
+- **Ninguna credencial se versiona.** `.gitignore` excluye `.venv/`, `data/`, `logs/`, `*.csv`, `*.p8`, `.env` y `__pycache__/`.
+- **Autenticación:** la conexión Snowflake CLI se configura localmente; este repositorio no contiene credenciales.
+- **Permisos mínimos:** el rol de la conexión necesita acceso a tu base de datos existente, uso del warehouse y permisos para trabajar en `RAW_DATA`. No ejecutes las cargas como `ACCOUNTADMIN`.
+- La clave privada vive fuera del repositorio. En Airflow se inyectará como secreto (Connection o variable de entorno), nunca dentro del código del DAG.
+- El warehouse tiene `AUTO_SUSPEND` corto para no consumir créditos del trial sin necesidad.
 
 ---
 
@@ -253,29 +378,32 @@ Antes de ejecutar `02_put_files.sql`, ajustar las rutas absolutas de los `PUT` a
 | Carga por código (`PUT` + `COPY INTO`) en lugar de la interfaz web | La interfaz web limita los archivos a 250 MB, y `members.csv` pesa 1,2 GB |
 | No dividir los archivos en bloques | `PUT` sube en paralelo y comprime: `members.csv` quedó en unos 165 MB comprimidos |
 | Capa RAW con todas las columnas como `VARCHAR` | Evita errores de carga por fechas o números mal formados; los tipos se aplican en staging |
-| Autenticación por key-pair | `externalbrowser` no funciona en la cuenta trial y Airflow no tiene navegador |
-| Rol dedicado `ETL_ROLE` | Mínimo privilegio, separado de `ACCOUNTADMIN` |
-| `ETL_ROLE` como dueño de las tablas | `CREATE OR REPLACE` exige ser dueño; el DAG se conectará con ese rol |
-| `ON_ERROR = 'ABORT_STATEMENT'` en la recarga | Evita que se salten filas en silencio |
+| Subida local con Snowflake CLI desde Python | Evita rutas absolutas específicas de un equipo y funciona en los principales sistemas operativos |
+| Tablas `_LOAD` y `SWAP` | Mantiene la versión actual de las tablas RAW mientras se cargan los CSV |
+| `ABORT_STATEMENT` para las cargas | Evita que el proceso reporte éxito dejando filas fuera silenciosamente |
+| Logs locales rotativos | Conserva diagnósticos sin versionar salidas potencialmente sensibles |
+| File format independiente para caracteres inválidos | Limita la sustitución de caracteres a `GROUPS_TOPICS`, `MEMBERS` y `TOPICS` sin cambiar las otras cargas |
+| Autenticación configurada fuera del repositorio | Evita almacenar secretos en el código |
+| Rol con permisos limitados | El pipeline no requiere ejecutar las cargas como `ACCOUNTADMIN` |
+| `ON_ERROR = 'ABORT_STATEMENT'` en las cargas | Evita que se salten filas en silencio |
 
 ---
 
 ## Calidad de datos: hallazgos
 
-### Codificación mezclada en `members.csv` y `topics.csv`
+### Caracteres no UTF-8 en algunos CSV
 
-La primera carga con `ON_ERROR = 'CONTINUE'` rechazó filas por `Invalid UTF8 detected`:
+Algunos archivos contienen bytes que no son UTF-8 válido. En la ejecución, Snowflake detectó este caso en `groups_topics.csv`:
 
 | Tabla | Filas rechazadas | Ejemplo | Columna |
 |-------|------------------|---------|---------|
-| `MEMBERS` | 38 de 5.893.886 | `Guadalajara, M0xE9xico` | `hometown` |
-| `TOPICS` | 7 de 2.509 | `Parents conscients pa0xEFens` | `topic_name` |
+| `GROUPS_TOPICS` | La carga estricta se detuvo | `Health and Wellness 0x95 Wellness 0x95 Holistic Health` | `topic_name` |
 
-**Causa:** casi todo el archivo está en UTF-8, pero algunas filas se guardaron en Latin-1 en el origen (`0xE9` es la `é` y `0xEF` la `ï` en Latin-1).
+La carga se detuvo intencionalmente porque `ON_ERROR = 'ABORT_STATEMENT'` evita omitir registros silenciosamente. Un byte `0x95` no es válido como carácter UTF-8 independiente. El barrido local de los CSV encontró secuencias UTF-8 inválidas en `groups_topics.csv`, `members.csv` y `topics.csv`; los otros seis archivos pasaron esa comprobación.
 
-**Solución aplicada:** `REPLACE_INVALID_CHARACTERS = TRUE` en el file format y recarga con `ABORT_STATEMENT`. Se cargan todas las filas, y en esos 45 textos el carácter inválido queda sustituido por `�`. No se cambió el file format a Latin-1 porque dañaría los acentos de las filas que sí están en UTF-8.
+**Solución aplicada:** el flujo normal usa `FF_CSV_REPLACE_INVALID` con `REPLACE_INVALID_CHARACTERS = TRUE` para `GROUPS_TOPICS`, `MEMBERS` y `TOPICS`, manteniendo `ABORT_STATEMENT`. Snowflake reemplaza los bytes inválidos en vez de rechazar el archivo completo; las demás tablas siguen usando el formato estricto normal. No se interpreta todo el CSV como Latin-1, lo que podría dañar los caracteres UTF-8 válidos.
 
-**Alternativa descartada:** normalizar los CSV con Python antes de subirlos. Conserva las tildes exactas, pero obliga a volver a subir 1,2 GB.
+Vuelve a ejecutar el paso 4 después de que la versión actualizada de `sql/03_create_and_load_raw.sql` esté disponible. Este archivo recrea las tablas de trabajo `_LOAD`, de modo que la carga fallida anterior puede reintentarse sin truncar primero las tablas RAW.
 
 ### Otras observaciones
 
@@ -286,13 +414,18 @@ La primera carga con `ON_ERROR = 'CONTINUE'` rechazó filas por `Invalid UTF8 de
 
 ## Validación
 
-### Conteo de filas por tabla
+En Snowsight, selecciona la misma base de datos configurada en la conexión y ejecuta este conteo:
 
 ```sql
-SELECT table_name, row_count
-FROM RAPPI_MEETUP_DB.INFORMATION_SCHEMA.TABLES
-WHERE table_schema = 'RAW_DATA'
-ORDER BY table_name;
+SELECT 'CATEGORIES' AS table_name, COUNT(*) AS row_count FROM RAW_DATA.CATEGORIES
+UNION ALL SELECT 'CITIES', COUNT(*) FROM RAW_DATA.CITIES
+UNION ALL SELECT 'EVENTS', COUNT(*) FROM RAW_DATA.EVENTS
+UNION ALL SELECT 'GROUPS', COUNT(*) FROM RAW_DATA.GROUPS
+UNION ALL SELECT 'GROUPS_TOPICS', COUNT(*) FROM RAW_DATA.GROUPS_TOPICS
+UNION ALL SELECT 'MEMBERS', COUNT(*) FROM RAW_DATA.MEMBERS
+UNION ALL SELECT 'MEMBERS_TOPICS', COUNT(*) FROM RAW_DATA.MEMBERS_TOPICS
+UNION ALL SELECT 'TOPICS', COUNT(*) FROM RAW_DATA.TOPICS
+UNION ALL SELECT 'VENUES', COUNT(*) FROM RAW_DATA.VENUES;
 ```
 
 Valores esperados tras la recarga:
@@ -313,7 +446,7 @@ Valores esperados tras la recarga:
 
 ```sql
 SELECT table_name, row_parsed, row_count, error_count
-FROM RAPPI_MEETUP_DB.INFORMATION_SCHEMA.LOAD_HISTORY
+FROM INFORMATION_SCHEMA.LOAD_HISTORY
 WHERE schema_name = 'RAW_DATA'
 ORDER BY table_name, last_load_time DESC;
 ```
@@ -331,9 +464,9 @@ ORDER BY table_name, last_load_time DESC;
 | `snow: command not found` | Python de la Microsoft Store guarda los scripts fuera del `PATH` | Usar un entorno virtual (`.venv`) |
 | `Failed to set strict permissions on ...config.toml` | Windows redirige `AppData\Local` para Python de la Store | Definir `SNOWFLAKE_HOME` en una carpeta propia |
 | `Password is empty` | El asistente `snow connection add` dejó `externalbrowser` en el campo `host` | Recrear la conexión con flags explícitos y `--no-interactive` |
-| `390190 ... SAML Identity Provider` | La cuenta trial no tiene SSO, así que `externalbrowser` no aplica | Autenticación por key-pair (`SNOWFLAKE_JWT`) |
-| `390189 Role 'ETL_ROLE' does not exist or not authorized` | El bloque de permisos no se ejecutó completo en Snowsight | Ejecutarlo con **Run all** (Ctrl+Shift+Enter) |
-| `permission_denied` al abrir la vista previa de una tabla | `ETL_ROLE` es dueño y no estaba asignado a `ACCOUNTADMIN` | `GRANT ROLE ETL_ROLE TO ROLE ACCOUNTADMIN` |
+| `390190 ... SAML Identity Provider` | El proveedor de identidad rechazó el inicio de sesión por navegador | Usa una conexión `SNOWFLAKE_JWT` de servicio si está configurada y autorizada para la base de prueba; de lo contrario, consulta al administrador |
+| `Could not use database "RAPPI_MEETUP_TEST"` | La base no existe o el rol de la conexión no tiene permiso de uso | Crear/verificar la base y el esquema; conceder `USAGE` al rol y volver a probar la conexión |
+| `Encoding mismatch detected` seguido de `Status: OK` | El CLI detectó que la codificación de la terminal y la configuración difieren | No bloqueó la conexión; confirma el resultado en la fila `Status` |
 | `No active warehouse selected in the current session` | Snowsight no tiene warehouse activo | Seleccionar el warehouse arriba a la derecha o `USE WAREHOUSE ...` |
 | `Failed to transfer ownership ... APPLYBUDGET` | Se intentó cambiar el dueño de la tabla | No es necesario: `ACCOUNTADMIN` hereda los privilegios por la jerarquía de roles |
 | `Invalid UTF8 detected` | Filas en Latin-1 dentro de un CSV en UTF-8 | Ver [hallazgos de calidad](#calidad-de-datos-hallazgos) |
@@ -346,9 +479,9 @@ ORDER BY table_name, last_load_time DESC;
 Guardar en `docs/evidence/` y enlazar aquí:
 
 - [ ] Captura de la cuenta de Snowflake creada.
-- [ ] Salida de `snow connection test -c etl_conn`.
-- [ ] Salida del `LIST @RAW_DATA.STG_MEETUP`.
-- [ ] Conteo de filas de las 9 tablas.
+- [x] Conexión de prueba `meetup_test_etl_conn` validada (`Status: OK`; database `RAPPI_MEETUP_TEST`).
+- [x] Salida del `LIST @RAW_DATA.STG_MEETUP` con los 9 archivos.
+- [x] Conteo de filas de las 9 tablas coincidente con los valores esperados.
 - [ ] Resultado de `LOAD_HISTORY` con `error_count = 0`.
 - [ ] Ejecución exitosa del DAG en la interfaz de Airflow.
 - [ ] Alerta recibida en Slack.
