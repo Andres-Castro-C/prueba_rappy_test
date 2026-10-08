@@ -39,7 +39,7 @@ QUALIFY ROW_NUMBER() OVER (
 
 CREATE OR REPLACE TABLE STAGING.EVENTS_CLEAN AS
 SELECT
-  TRY_TO_NUMBER(NULLIF(TRIM(event_id), ''))::NUMBER(38, 0) AS event_id,
+  NULLIF(TRIM(event_id), '') AS event_id,
   TRY_TO_NUMBER(NULLIF(TRIM(group_id), ''))::NUMBER(38, 0) AS group_id,
   TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM(created), ''), 'YYYY-MM-DD HH24:MI:SS')
     AS created_at,
@@ -57,9 +57,9 @@ SELECT
     AS rating_count,
   NULLIF(TRIM(event_name), '') AS event_name
 FROM RAW_DATA.EVENTS
-WHERE TRY_TO_NUMBER(NULLIF(TRIM(event_id), '')) IS NOT NULL
+WHERE NULLIF(TRIM(event_id), '') IS NOT NULL
 QUALIFY ROW_NUMBER() OVER (
-  PARTITION BY TRY_TO_NUMBER(NULLIF(TRIM(event_id), ''))
+  PARTITION BY NULLIF(TRIM(event_id), '')
   ORDER BY TRY_TO_TIMESTAMP_NTZ(
     NULLIF(TRIM(updated), ''),
     'YYYY-MM-DD HH24:MI:SS'

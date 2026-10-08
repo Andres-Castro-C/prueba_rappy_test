@@ -26,10 +26,10 @@ Las capas viven en la base configurada en Snowflake. En la base de prueba `RAPPI
 |---|---|---:|
 | `RAW_DATA` | Datos originales de los nueve CSV | Conteos abajo |
 | `STAGING.GROUPS_CLEAN` | Grupos tipados y enriquecidos con ciudad/categoría | 16,330 |
-| `STAGING.EVENTS_CLEAN` | Eventos tipados | 563 |
+| `STAGING.EVENTS_CLEAN` | Eventos tipados (IDs alfanuméricos conservados como texto) | 5,807 |
 | `AUX.GROUPS_BY_CITY_CATEGORY` | Métricas de grupos y eventos por ciudad/categoría | 129 |
 
-Las métricas de miembros y RSVP son sumas reportadas por grupo/evento, no conteos de personas únicas. El dataset es una fotografía histórica.
+Los 16,330 grupos y los 5,807 eventos quedaron representados en el resumen; no se encontraron IDs duplicados ni eventos sin grupo asociado. Las métricas de miembros y RSVP son sumas reportadas por grupo/evento, no conteos de personas únicas. El dataset es una fotografía histórica.
 
 ## Requisitos
 

@@ -28,6 +28,9 @@ class AuxiliarySqlTests(unittest.TestCase):
 
         self.assertIn("TRY_TO_TIMESTAMP_NTZ", sql)
         self.assertIn("TRY_TO_DECIMAL", sql)
+        self.assertIn("NULLIF(TRIM(event_id), '') AS event_id", sql)
+        self.assertIn("WHERE NULLIF(TRIM(event_id), '') IS NOT NULL", sql)
+        self.assertNotIn("TRY_TO_NUMBER(NULLIF(TRIM(event_id)", sql)
         self.assertIn("COUNT(*)::NUMBER(38, 0) AS event_count", sql)
         self.assertIn("SUM(COALESCE(g.member_count, 0))", sql)
         self.assertIn("LEFT JOIN event_metrics", sql)
