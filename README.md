@@ -4,12 +4,15 @@ Prueba técnica de Data Engineering: carga el dataset de Meetup en Snowflake, pr
 
 ## Estado
 
-| Parte | Estado |
-|---|---|
-| Carga de los 9 CSV en Snowflake | ✅ Validada |
-| Tablas limpias y resumen analítico | ✅ Validados |
-| DAG de Airflow cada 15 minutos | ⏳ Pendiente |
-| Alertas a Slack y exportación a S3 | ⏳ Pendientes |
+| # | Requisito | Estado |
+|---:|---|---|
+| 1 | Cuenta y conexión a Snowflake | ✅ Validadas en `RAPPI_MEETUP_TEST` |
+| 2 | Carga de los 9 CSV en tablas RAW | ✅ Validada |
+| 3 | Tablas físicas auxiliares | ✅ `GROUPS_CLEAN`, `EVENTS_CLEAN` y `GROUPS_BY_CITY_CATEGORY` creadas y verificadas |
+| 4 | DAG de Airflow cada 15 minutos (`MERGE`, `CREATE`, `REPLACE`) | ⏳ Pendiente |
+| 5 | Alertas de Airflow hacia Slack | ⏳ Pendiente |
+| 6 | Exportación de tablas procesadas a S3 | ⏳ Pendiente |
+| 7 | Entrega de código, evidencias y repositorio | 🔄 En curso |
 
 ## Arquitectura
 
