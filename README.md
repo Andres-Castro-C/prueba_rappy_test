@@ -9,8 +9,8 @@ Prueba técnica de Data Engineering: carga el dataset de Meetup en Snowflake, pr
 | 1 | Cuenta y conexión a Snowflake | ✅ Validadas en `RAPPI_MEETUP_TEST` |
 | 2 | Carga de los 9 CSV en tablas RAW | ✅ Validada |
 | 3 | Tablas físicas auxiliares | ✅ `GROUPS_CLEAN`, `EVENTS_CLEAN` y `GROUPS_BY_CITY_CATEGORY` creadas y verificadas |
-| 4 | DAG de Airflow cada 15 minutos (`MERGE`, `CREATE`, `REPLACE`) | ⏳ Pendiente |
-| 5 | Alertas de Airflow hacia Slack | ⏳ Pendiente |
+| 4 | DAG de Airflow cada 15 minutos (`MERGE`, `CREATE`, `REPLACE`) | ✅ Completado (Docker Local) |
+| 5 | Alertas de Airflow hacia Slack | ✅ Configuradas vía Webhook |
 | 6 | Exportación de tablas procesadas a S3 | ⏳ Pendiente |
 | 7 | Entrega de código, evidencias y repositorio | 🔄 En curso |
 
@@ -20,7 +20,8 @@ Prueba técnica de Data Engineering: carga el dataset de Meetup en Snowflake, pr
 Dataset Meetup → stage Snowflake → RAW_DATA (9 tablas)
                                  → STAGING (grupos y eventos limpios)
                                  → AUX (resumen por ciudad y categoría)
-                                 → Airflow / Slack / S3 (pendiente)
+                                 → Airflow Orchestration & Slack Alerts
+                                 → S3 (pendiente)
 ```
 
 Las capas viven en la base configurada en Snowflake. En la base de prueba `RAPPI_MEETUP_TEST`:
@@ -86,6 +87,29 @@ Conteos verificados en Snowflake:
 
 El diseño carga primero en tablas `_LOAD` y usa `SWAP` para no reemplazar RAW hasta que la carga nueva finalice. Los CSV con bytes UTF-8 inválidos (`groups_topics.csv`, `members.csv`, `topics.csv`) usan un file format que reemplaza esos caracteres; las cargas conservan `ON_ERROR = 'ABORT_STATEMENT'` para evitar omitir filas silenciosamente.
 
+## Orquestación con Apache Airflow (Puntos 4 y 5)
+
+El pipeline está orquestado mediante Apache Airflow ejecutándose en contenedores Docker locales. 
+
+### DAG: `meetup_incremental_etl`
+Se configuró un DAG (`dags/meetup_incremental_etl.py`) que corre con una frecuencia de **15 minutos** (`schedule_interval='*/15 * * * *'`). Este DAG consta de tres tareas principales usando funciones de Snowflake:
+1. **`simulate_new_data`**: "Falsifica" la llegada de nuevos datos mutando las tablas origen en `RAW_DATA`. Suma de forma aleatoria `yes_rsvp_count` a eventos existentes, e inserta eventos completamente nuevos en grupos aleatorios, todo generado usando SQL dinámico.
+2. **`refresh_staging_events`**: Ejecuta una sentencia `MERGE` en `STAGING.EVENTS_CLEAN` contra `RAW_DATA.EVENTS`. Inserta registros nuevos (NOT MATCHED) y actualiza registros existentes (MATCHED) validando el timestamp `updated_at`.
+3. **`refresh_aux_table`**: Reconstruye la tabla agregada `AUX.GROUPS_BY_CITY_CATEGORY` con los datos en staging limpios utilizando `CREATE OR REPLACE TABLE`.
+
+### Alertas en Slack
+Se hace uso del proveedor oficial de Slack (`apache-airflow-providers-slack`) y el `SlackWebhookOperator`. Al finalizar satisfactoriamente todo el DAG, el `on_success_callback` emite un reporte automático a un canal de Slack usando Webhooks con el detalle del pipeline y la fecha de ejecución.
+
+### Ejecución de Airflow
+Desde la raíz del proyecto, asegúrate de tener Docker corriendo:
+```bash
+# Iniciar los servicios de Airflow (Webserver, Scheduler, Postgres, Redis)
+docker compose up -d
+```
+Ingresa a `http://localhost:8080` (usr/pass: `airflow`) y configura:
+1. Conexión de tipo Snowflake llamada `snowflake_default`.
+2. Conexión de tipo HTTP o Slack API llamada `slack_connection` con la URL parcial de tu Webhook de Slack.
+
 ## Estructura
 
 ```text
@@ -94,12 +118,10 @@ scripts/   Subida de CSV, ejecución SQL y logging
 tests/     Pruebas unitarias locales
 data/      CSV descargados (no versionados)
 logs/      Logs de ejecución (no versionados)
-dags/      Próxima etapa: orquestación con Airflow
+dags/      DAGs de Apache Airflow para orquestación incremental
 ```
 
 ## Próximas etapas
 
-1. Implementar y probar el DAG idempotente de Airflow con frecuencia de 15 minutos.
-2. Configurar alertas de fallos en Slack.
-3. Exportar resultados a S3 mediante una integración de almacenamiento segura.
-4. Adjuntar evidencias de ejecución y completar la entrega.
+1. Exportar resultados a S3 mediante una integración de almacenamiento segura.
+2. Adjuntar evidencias de ejecución y completar la entrega.
