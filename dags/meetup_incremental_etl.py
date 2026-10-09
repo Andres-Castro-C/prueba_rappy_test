@@ -83,22 +83,22 @@ with DAG(
         MERGE INTO STAGING.EVENTS_CLEAN tgt
         USING (
             SELECT
-                NULLIF(TRIM("event_id"), '') AS event_id,
-                TRY_TO_NUMBER(NULLIF(TRIM("group_id"), ''))::NUMBER(38, 0) AS group_id,
-                TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM("created"), ''), 'YYYY-MM-DD HH24:MI:SS') AS created_at,
-                TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM("event_time"), ''), 'YYYY-MM-DD HH24:MI:SS') AS event_at,
-                TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM("updated"), ''), 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
-                NULLIF(TRIM("event_status"), '') AS event_status,
-                TRY_TO_NUMBER(NULLIF(TRIM("yes_rsvp_count"), ''))::NUMBER(38, 0) AS yes_rsvp_count,
-                TRY_TO_NUMBER(NULLIF(TRIM("maybe_rsvp_count"), ''))::NUMBER(38, 0) AS maybe_rsvp_count,
+                NULLIF(TRIM(event_id), '') AS event_id,
+                TRY_TO_NUMBER(NULLIF(TRIM(group_id), ''))::NUMBER(38, 0) AS group_id,
+                TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM(created), ''), 'YYYY-MM-DD HH24:MI:SS') AS created_at,
+                TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM(event_time), ''), 'YYYY-MM-DD HH24:MI:SS') AS event_at,
+                TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM(updated), ''), 'YYYY-MM-DD HH24:MI:SS') AS updated_at,
+                NULLIF(TRIM(event_status), '') AS event_status,
+                TRY_TO_NUMBER(NULLIF(TRIM(yes_rsvp_count), ''))::NUMBER(38, 0) AS yes_rsvp_count,
+                TRY_TO_NUMBER(NULLIF(TRIM(maybe_rsvp_count), ''))::NUMBER(38, 0) AS maybe_rsvp_count,
                 TRY_TO_DECIMAL(NULLIF(TRIM("rating.average"), ''), 5, 2) AS rating_average,
                 TRY_TO_NUMBER(NULLIF(TRIM("rating.count"), ''))::NUMBER(38, 0) AS rating_count,
-                NULLIF(TRIM("event_name"), '') AS event_name
+                NULLIF(TRIM(event_name), '') AS event_name
             FROM RAW_DATA.EVENTS
-            WHERE NULLIF(TRIM("event_id"), '') IS NOT NULL
+            WHERE NULLIF(TRIM(event_id), '') IS NOT NULL
             QUALIFY ROW_NUMBER() OVER (
-              PARTITION BY NULLIF(TRIM("event_id"), '')
-              ORDER BY TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM("updated"), ''), 'YYYY-MM-DD HH24:MI:SS') DESC NULLS LAST
+              PARTITION BY NULLIF(TRIM(event_id), '')
+              ORDER BY TRY_TO_TIMESTAMP_NTZ(NULLIF(TRIM(updated), ''), 'YYYY-MM-DD HH24:MI:SS') DESC NULLS LAST
             ) = 1
         ) src
         ON tgt.event_id = src.event_id

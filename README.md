@@ -9,8 +9,8 @@ Prueba técnica de Data Engineering: carga el dataset de Meetup en Snowflake, pr
 | 1 | Cuenta y conexión a Snowflake | ✅ Validadas en `RAPPI_MEETUP_TEST` |
 | 2 | Carga de los 9 CSV en tablas RAW | ✅ Validada |
 | 3 | Tablas físicas auxiliares | ✅ `GROUPS_CLEAN`, `EVENTS_CLEAN` y `GROUPS_BY_CITY_CATEGORY` creadas y verificadas |
-| 4 | DAG de Airflow cada 15 minutos (`MERGE`, `CREATE`, `REPLACE`) | ✅ Completado (Docker Local) |
-| 5 | Alertas de Airflow hacia Slack | ✅ Configuradas vía Webhook |
+| 4 | DAG de Airflow cada 15 minutos (`MERGE`, `CREATE OR REPLACE`) | ✅ Validado localmente en Docker |
+| 5 | Notificaciones de éxito de Airflow hacia Slack | ✅ Entregadas vía Incoming Webhook |
 | 6 | Exportación de tablas procesadas a S3 | ⏳ Pendiente |
 | 7 | Entrega de código, evidencias y repositorio | 🔄 En curso |
 
@@ -26,7 +26,7 @@ Dataset Meetup → stage Snowflake → RAW_DATA (9 tablas)
 
 Las capas viven en la base configurada en Snowflake. En la base de prueba `RAPPI_MEETUP_TEST`:
 
-| Esquema | Contenido | Filas validadas |
+| Esquema | Contenido | Filas validadas en la carga inicial |
 |---|---|---:|
 | `RAW_DATA` | Datos originales de los nueve CSV | Conteos abajo |
 | `STAGING.GROUPS_CLEAN` | Grupos tipados y enriquecidos con ciudad/categoría | 16,330 |
@@ -89,26 +89,59 @@ El diseño carga primero en tablas `_LOAD` y usa `SWAP` para no reemplazar RAW h
 
 ## Orquestación con Apache Airflow (Puntos 4 y 5)
 
-El pipeline está orquestado mediante Apache Airflow ejecutándose en contenedores Docker locales. 
+Airflow se ejecuta localmente con Docker Compose (Airflow 2.10.2, CeleryExecutor, PostgreSQL y Redis). Los proveedores Snowflake y Slack se instalan en los contenedores mediante `_PIP_ADDITIONAL_REQUIREMENTS` en el `.env` local; el archivo `.env` no se versiona.
 
 ### DAG: `meetup_incremental_etl`
-Se configuró un DAG (`dags/meetup_incremental_etl.py`) que corre con una frecuencia de **15 minutos** (`schedule_interval='*/15 * * * *'`). Este DAG consta de tres tareas principales usando funciones de Snowflake:
-1. **`simulate_new_data`**: "Falsifica" la llegada de nuevos datos mutando las tablas origen en `RAW_DATA`. Suma de forma aleatoria `yes_rsvp_count` a eventos existentes, e inserta eventos completamente nuevos en grupos aleatorios, todo generado usando SQL dinámico.
-2. **`refresh_staging_events`**: Ejecuta una sentencia `MERGE` en `STAGING.EVENTS_CLEAN` contra `RAW_DATA.EVENTS`. Inserta registros nuevos (NOT MATCHED) y actualiza registros existentes (MATCHED) validando el timestamp `updated_at`.
-3. **`refresh_aux_table`**: Reconstruye la tabla agregada `AUX.GROUPS_BY_CITY_CATEGORY` con los datos en staging limpios utilizando `CREATE OR REPLACE TABLE`.
+El DAG definido en [`dags/meetup_incremental_etl.py`](./dags/meetup_incremental_etl.py) usa el cron `*/15 * * * *`, `catchup=False` y una cadena secuencial de tres tareas:
+
+1. **`simulate_new_data`** genera actividad demostrativa en Snowflake: incrementa aleatoriamente RSVP de algunos eventos e inserta un evento sintético asociado a un grupo.
+2. **`refresh_staging_events`** transforma `RAW_DATA.EVENTS` y aplica un `MERGE` en `STAGING.EVENTS_CLEAN`: inserta eventos nuevos y actualiza los que tienen un `updated_at` más reciente.
+3. **`refresh_aux_table`** vuelve a calcular `AUX.GROUPS_BY_CITY_CATEGORY` usando `CREATE OR REPLACE TABLE` y las tablas de staging.
+
+La ejecución se probó en Snowflake con el rol `ETL_ROLE`; las tres tareas terminaron en estado `success`. Una ejecución confirmó el evento adicional en `EVENTS_CLEAN` y que sus identificadores seguían siendo únicos.
+
+> **Importante sobre los datos:** `simulate_new_data` modifica directamente `RAPPI_MEETUP_TEST.RAW_DATA.EVENTS` e inserta una fila sintética nueva en cada ejecución exitosa. Esta simulación sirve para demostrar cambios periódicos, pero hace que RAW deje de ser una copia inmutable del dataset de Kaggle. El DAG puede pausarse desde Airflow si se quiere detener la simulación. No ejecutes la tarea repetidamente en un entorno donde RAW deba permanecer intacto.
 
 ### Alertas en Slack
-Se hace uso del proveedor oficial de Slack (`apache-airflow-providers-slack`) y el `SlackWebhookOperator`. Al finalizar satisfactoriamente todo el DAG, el `on_success_callback` emite un reporte automático a un canal de Slack usando Webhooks con el detalle del pipeline y la fecha de ejecución.
+El callback `on_success_callback` usa el proveedor oficial `apache-airflow-providers-slack` y `SlackWebhookOperator`. Está definido en los argumentos por defecto de las tareas, por lo que envía una notificación por cada tarea exitosa (tres mensajes por una ejecución completa), con DAG, tarea y fecha de ejecución. La entrega fue comprobada en el canal configurado. El DAG no define actualmente un callback de fallo; los fallos se consultan en Airflow.
 
 ### Ejecución de Airflow
-Desde la raíz del proyecto, asegúrate de tener Docker corriendo:
+Desde la raíz del proyecto, asegúrate de tener Docker Desktop iniciado. Configura el `.env` local con los proveedores requeridos y con la ruta absoluta, en el host, a la clave privada RSA de solo lectura utilizada por el usuario de servicio:
+
+```dotenv
+AIRFLOW_UID=<UID del usuario local>
+_PIP_ADDITIONAL_REQUIREMENTS=apache-airflow-providers-snowflake apache-airflow-providers-slack
+AIRFLOW_SNOWFLAKE_KEY_PATH=<ruta absoluta a rsa_key.p8>
+```
+
+En macOS, por ejemplo, `AIRFLOW_SNOWFLAKE_KEY_PATH=/Users/<usuario>/.snowflake/keys/rsa_key.p8`. La clave privada debe corresponder a una clave pública registrada en Snowflake para `SVC_ETL`; no la guardes en el repositorio. Compose la monta como solo lectura en `/opt/airflow/keys/svc_etl_mac.p8`.
+
+Inicia los servicios:
+
 ```bash
-# Iniciar los servicios de Airflow (Webserver, Scheduler, Postgres, Redis)
 docker compose up -d
 ```
-Ingresa a `http://localhost:8080` (usr/pass: `airflow`) y configura:
-1. Conexión de tipo Snowflake llamada `snowflake_default`.
-2. Conexión de tipo HTTP o Slack API llamada `slack_connection` con la URL parcial de tu Webhook de Slack.
+
+Abre `http://localhost:8080` (usuario y contraseña por defecto `airflow`; solo para desarrollo local). En **Admin → Connections**, configura:
+
+1. La conexión `snowflake_default` de tipo **Snowflake**: login `SVC_ETL`, esquema `RAW_DATA`, sin contraseña y los siguientes valores en **Extra**:
+
+   ```json
+   {
+     "account": "KPMVEXI-LE96351",
+     "warehouse": "SNOWFLAKE_LEARNING_WH",
+     "database": "RAPPI_MEETUP_TEST",
+     "role": "ETL_ROLE",
+     "authenticator": "SNOWFLAKE_JWT",
+     "private_key_file": "/opt/airflow/keys/svc_etl_mac.p8"
+   }
+   ```
+
+2. La conexión `slack_connection` de tipo **Slack Incoming Webhook**, con el token/ruta parcial del webhook almacenado en el campo correspondiente de la conexión. Mantén el webhook privado; no lo incluyas en `.env` versionado, el DAG ni capturas públicas.
+
+Antes de habilitar el DAG, valida la conexión Snowflake con una consulta de solo lectura desde Airflow y confirma el contexto `SVC_ETL`, `ETL_ROLE`, `RAPPI_MEETUP_TEST`, `RAW_DATA` y `SNOWFLAKE_LEARNING_WH`. En la interfaz de Airflow, despausa `meetup_incremental_etl` para permitir las ejecuciones cada 15 minutos; pausa el DAG para detenerlas.
+
+Una ejecución local validada completó `simulate_new_data`, `refresh_staging_events` y `refresh_aux_table`; los mensajes correspondientes llegaron a Slack. Conserva capturas de la vista de ejecuciones y del canal como evidencia de la prueba.
 
 ## Estructura
 
