@@ -35,6 +35,7 @@ with DAG(
     schedule_interval='*/15 * * * *',
     start_date=datetime(2023, 1, 1),
     catchup=False,
+    max_active_runs=1,
     tags=['meetup'],
 ) as dag:
 
@@ -163,4 +164,27 @@ with DAG(
         """
     )
 
-    simulate_new_data >> refresh_staging_events >> refresh_aux_table
+    export_processed_tables = SnowflakeOperator(
+        task_id='export_processed_tables',
+        snowflake_conn_id='snowflake_default',
+        split_statements=True,
+        sql=[
+            """
+            COPY INTO @RAPPI_MEETUP_TEST.AUX.MEETUP_S3_STAGE/snapshots/{{ ds }}/{{ run_id | replace(':', '-') | replace('+', '_') }}/GROUPS_CLEAN/
+            FROM RAPPI_MEETUP_TEST.STAGING.GROUPS_CLEAN
+            FILE_FORMAT = (TYPE = PARQUET COMPRESSION = SNAPPY);
+            """,
+            """
+            COPY INTO @RAPPI_MEETUP_TEST.AUX.MEETUP_S3_STAGE/snapshots/{{ ds }}/{{ run_id | replace(':', '-') | replace('+', '_') }}/EVENTS_CLEAN/
+            FROM RAPPI_MEETUP_TEST.STAGING.EVENTS_CLEAN
+            FILE_FORMAT = (TYPE = PARQUET COMPRESSION = SNAPPY);
+            """,
+            """
+            COPY INTO @RAPPI_MEETUP_TEST.AUX.MEETUP_S3_STAGE/snapshots/{{ ds }}/{{ run_id | replace(':', '-') | replace('+', '_') }}/GROUPS_BY_CITY_CATEGORY/
+            FROM RAPPI_MEETUP_TEST.AUX.GROUPS_BY_CITY_CATEGORY
+            FILE_FORMAT = (TYPE = PARQUET COMPRESSION = SNAPPY);
+            """,
+        ],
+    )
+
+    simulate_new_data >> refresh_staging_events >> refresh_aux_table >> export_processed_tables

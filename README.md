@@ -11,7 +11,7 @@ Prueba técnica de Data Engineering: carga el dataset de Meetup en Snowflake, pr
 | 3 | Tablas físicas auxiliares | ✅ `GROUPS_CLEAN`, `EVENTS_CLEAN` y `GROUPS_BY_CITY_CATEGORY` creadas y verificadas |
 | 4 | DAG de Airflow cada 15 minutos (`MERGE`, `CREATE OR REPLACE`) | ✅ Validado localmente en Docker |
 | 5 | Notificaciones de éxito de Airflow hacia Slack | ✅ Entregadas vía Incoming Webhook |
-| 6 | Exportación de tablas procesadas a S3 | ⏳ Pendiente |
+| 6 | Exportación de tablas procesadas a S3 | ✅ Validada en `us-east-2` con Parquet |
 | 7 | Entrega de código, evidencias y repositorio | 🔄 En curso |
 
 ## Arquitectura
@@ -20,8 +20,8 @@ Prueba técnica de Data Engineering: carga el dataset de Meetup en Snowflake, pr
 Dataset Meetup → stage Snowflake → RAW_DATA (9 tablas)
                                  → STAGING (grupos y eventos limpios)
                                  → AUX (resumen por ciudad y categoría)
-                                 → Airflow Orchestration & Slack Alerts
-                                 → S3 (pendiente)
+                                 → Airflow (cada 15 min) + alertas Slack
+                                 → S3 (snapshots Parquet; retención de 30 días)
 ```
 
 Las capas viven en la base configurada en Snowflake. En la base de prueba `RAPPI_MEETUP_TEST`:
@@ -92,18 +92,19 @@ El diseño carga primero en tablas `_LOAD` y usa `SWAP` para no reemplazar RAW h
 Airflow se ejecuta localmente con Docker Compose (Airflow 2.10.2, CeleryExecutor, PostgreSQL y Redis). Los proveedores Snowflake y Slack se instalan en los contenedores mediante `_PIP_ADDITIONAL_REQUIREMENTS` en el `.env` local; el archivo `.env` no se versiona.
 
 ### DAG: `meetup_incremental_etl`
-El DAG definido en [`dags/meetup_incremental_etl.py`](./dags/meetup_incremental_etl.py) usa el cron `*/15 * * * *`, `catchup=False` y una cadena secuencial de tres tareas:
+El DAG definido en [`dags/meetup_incremental_etl.py`](./dags/meetup_incremental_etl.py) usa el cron `*/15 * * * *`, `catchup=False`, permite como máximo una ejecución activa (`max_active_runs=1`) y ejecuta una cadena secuencial de cuatro tareas:
 
 1. **`simulate_new_data`** genera actividad demostrativa en Snowflake: incrementa aleatoriamente RSVP de algunos eventos e inserta un evento sintético asociado a un grupo.
 2. **`refresh_staging_events`** transforma `RAW_DATA.EVENTS` y aplica un `MERGE` en `STAGING.EVENTS_CLEAN`: inserta eventos nuevos y actualiza los que tienen un `updated_at` más reciente.
 3. **`refresh_aux_table`** vuelve a calcular `AUX.GROUPS_BY_CITY_CATEGORY` usando `CREATE OR REPLACE TABLE` y las tablas de staging.
+4. **`export_processed_tables`** exporta las tres tablas procesadas a S3 en formato Parquet con compresión Snappy. Cada ejecución usa un directorio separado por fecha, `run_id` y tabla.
 
-La ejecución se probó en Snowflake con el rol `ETL_ROLE`; las tres tareas terminaron en estado `success`. Una ejecución confirmó el evento adicional en `EVENTS_CLEAN` y que sus identificadores seguían siendo únicos.
+La ejecución se probó en Snowflake con el rol `ETL_ROLE`. La corrida manual `manual__2026-10-09T15:55:19+00:00` terminó en estado `success` para las cuatro tareas, incluida la exportación; también se verificaron los archivos Parquet de las tres tablas en S3. Una ejecución confirmó que los identificadores de `EVENTS_CLEAN` seguían siendo únicos.
 
 > **Importante sobre los datos:** `simulate_new_data` modifica directamente `RAPPI_MEETUP_TEST.RAW_DATA.EVENTS` e inserta una fila sintética nueva en cada ejecución exitosa. Esta simulación sirve para demostrar cambios periódicos, pero hace que RAW deje de ser una copia inmutable del dataset de Kaggle. El DAG puede pausarse desde Airflow si se quiere detener la simulación. No ejecutes la tarea repetidamente en un entorno donde RAW deba permanecer intacto.
 
 ### Alertas en Slack
-El callback `on_success_callback` usa el proveedor oficial `apache-airflow-providers-slack` y `SlackWebhookOperator`. Está definido en los argumentos por defecto de las tareas, por lo que envía una notificación por cada tarea exitosa (tres mensajes por una ejecución completa), con DAG, tarea y fecha de ejecución. La entrega fue comprobada en el canal configurado. El DAG no define actualmente un callback de fallo; los fallos se consultan en Airflow.
+El callback `on_success_callback` usa el proveedor oficial `apache-airflow-providers-slack` y `SlackWebhookOperator`. Está definido en los argumentos por defecto de las tareas, por lo que envía una notificación por cada tarea exitosa (cuatro mensajes por una ejecución completa), con DAG, tarea y fecha de ejecución. La entrega fue comprobada en el canal configurado. El DAG no define actualmente un callback de fallo; los fallos se consultan en Airflow.
 
 ### Ejecución de Airflow
 Desde la raíz del proyecto, asegúrate de tener Docker Desktop iniciado. Configura el `.env` local con los proveedores requeridos y con la ruta absoluta, en el host, a la clave privada RSA de solo lectura utilizada por el usuario de servicio:
@@ -141,7 +142,46 @@ Abre `http://localhost:8080` (usuario y contraseña por defecto `airflow`; solo 
 
 Antes de habilitar el DAG, valida la conexión Snowflake con una consulta de solo lectura desde Airflow y confirma el contexto `SVC_ETL`, `ETL_ROLE`, `RAPPI_MEETUP_TEST`, `RAW_DATA` y `SNOWFLAKE_LEARNING_WH`. En la interfaz de Airflow, despausa `meetup_incremental_etl` para permitir las ejecuciones cada 15 minutos; pausa el DAG para detenerlas.
 
-Una ejecución local validada completó `simulate_new_data`, `refresh_staging_events` y `refresh_aux_table`; los mensajes correspondientes llegaron a Slack. Conserva capturas de la vista de ejecuciones y del canal como evidencia de la prueba.
+Las tareas originales `simulate_new_data`, `refresh_staging_events` y `refresh_aux_table` se ejecutaron con éxito; los mensajes correspondientes llegaron a Slack. Conserva capturas de la vista de ejecuciones y del canal como evidencia de la prueba.
+
+## Exportación a Amazon S3 (Punto 6)
+
+Snowflake exporta las tablas procesadas directamente a Amazon S3 mediante una integración de almacenamiento IAM, sin claves AWS en Airflow ni en el repositorio:
+
+- Bucket privado: `meetup-etl-rappi`, región AWS `us-east-2` (Ohio), con acceso público bloqueado y cifrado predeterminado.
+- Prefijo permitido por Snowflake: `s3://meetup-etl-rappi/exports/meetup/`.
+- El rol IAM `MeetupSnowflakeExportRole` tiene una política limitada al prefijo de exportación y una relación de confianza con el principal y external ID generados por `MEETUP_S3_INT`.
+- La integración Snowflake `MEETUP_S3_INT` está permitida para `ETL_ROLE`; el stage externo `RAPPI_MEETUP_TEST.AUX.MEETUP_S3_STAGE` referencia el prefijo S3.
+- `COPY INTO` escribe Parquet con compresión Snappy. La prueba de integración creó un archivo de validación en S3 antes de habilitar la exportación de las tablas.
+
+Al terminar `refresh_aux_table`, la tarea `export_processed_tables` exporta `STAGING.GROUPS_CLEAN`, `STAGING.EVENTS_CLEAN` y `AUX.GROUPS_BY_CITY_CATEGORY`. Cada ejecución escribe bajo un directorio único:
+
+```text
+s3://meetup-etl-rappi/exports/meetup/snapshots/<fecha>/<run_id>/<tabla>/
+```
+
+La regla de ciclo de vida del bucket expira los objetos actuales bajo `exports/meetup/snapshots/` después de 30 días. No aplica al prefijo `_validation/`. Al ejecutarse el DAG cada 15 minutos, una exportación completa puede producir hasta 96 snapshots al día; el formato Parquet comprimido reduce su tamaño, pero el almacenamiento, las solicitudes S3 y el cómputo Snowflake tienen costo. Supervisa el consumo y pausa el DAG si deseas detener nuevas exportaciones.
+
+La integración se validó primero mediante una exportación Parquet pequeña a `_validation/`; el objeto `data_0_0_0.snappy.parquet` apareció en el bucket. Después, una corrida manual completa del DAG terminó en `success` y exportó las tres tablas procesadas; se verificaron tres archivos Parquet en S3 (uno por tabla en esa ejecución). No almacenes ni publiques el external ID de Snowflake, políticas con datos de cuenta, tokens de Slack ni claves privadas.
+
+### Evidencia de validación
+
+La corrida manual completa `manual__2026-10-09T15:55:19+00:00` terminó correctamente en Airflow:
+
+| Tarea | Resultado |
+|---|---|
+| `simulate_new_data` | `success` |
+| `refresh_staging_events` | `success` |
+| `refresh_aux_table` | `success` |
+| `export_processed_tables` | `success` |
+
+Se verificaron los tres objetos Parquet de esa corrida en:
+
+```text
+s3://meetup-etl-rappi/exports/meetup/snapshots/2026-10-09/manual__2026-10-09T15-55-19_00-00/
+```
+
+La regla de ciclo de vida retiene los objetos del prefijo `snapshots/` durante 30 días. Para la entrega final, se recomienda guardar capturas sanitizadas de (1) la vista de Airflow con las cuatro tareas exitosas, (2) los tres objetos bajo el prefijo anterior en S3 y (3) los mensajes de éxito correspondientes en Slack. No incluyas claves, tokens, external IDs, contraseñas ni información sensible de la cuenta en las capturas. Las capturas no se incrustan en este README; el texto anterior registra el resultado reproducible sin añadir imágenes grandes al repositorio.
 
 ## Estructura
 
