@@ -1,34 +1,68 @@
-# Meetup Data Pipeline
+# Meetup Data Engineering Pipeline
 
-Prueba técnica de Data Engineering: carga el dataset de Meetup en Snowflake, prepara tablas analíticas y deja una base reproducible para incorporar orquestación y exportación.
+Pipeline end-to-end de ingeniería de datos construido para una prueba técnica: ingesta de nueve CSV, transformación analítica, actualización incremental orquestada y exportación por ejecución a Amazon S3. El proyecto prioriza cargas seguras, resultados verificables y una ruta reproducible de ejecución.
 
-## Estado
+**Entrega:** puntos técnicos 1–6 implementados y validados; cambios integrados en `main`.
+**Tecnologías:** Snowflake · SQL · Python · Apache Airflow · Docker Compose · Slack · AWS S3 · Parquet/Snappy.
 
-| # | Requisito | Estado |
-|---:|---|---|
-| 1 | Cuenta y conexión a Snowflake | ✅ Validadas en `RAPPI_MEETUP_TEST` |
-| 2 | Carga de los 9 CSV en tablas RAW | ✅ Validada |
-| 3 | Tablas físicas auxiliares | ✅ `GROUPS_CLEAN`, `EVENTS_CLEAN` y `GROUPS_BY_CITY_CATEGORY` creadas y verificadas |
-| 4 | DAG de Airflow cada 15 minutos (`MERGE`, `CREATE OR REPLACE`) | ✅ Validado localmente en Docker |
-| 5 | Notificaciones de éxito de Airflow hacia Slack | ✅ Entregadas vía Incoming Webhook |
-| 6 | Exportación de tablas procesadas a S3 | ✅ Validada en `us-east-2` con Parquet |
-| 7 | Entrega de código, evidencias y repositorio | 🔄 En curso |
+## Resultados frente a la prueba técnica
+
+| Punto | Requisito | Estado | Resultado comprobable |
+|---:|---|---|---|
+| 1 | Preparar acceso a Snowflake | **FINALIZADO** | Conexión y contexto de ejecución validados. Las credenciales se mantienen fuera del repositorio. |
+| 2 | Cargar los nueve CSV a RAW | **FINALIZADO** | Nueve tablas cargadas; conteos comprobados en Snowflake. La carga prepara tablas temporales y solo intercambia RAW al finalizar correctamente. |
+| 3 | Crear tablas auxiliares | **FINALIZADO** | `STAGING.GROUPS_CLEAN`, `STAGING.EVENTS_CLEAN` y `AUX.GROUPS_BY_CITY_CATEGORY` creadas y verificadas; sin IDs de evento duplicados en la validación. |
+| 4 | Automatizar el flujo cada 15 minutos | **FINALIZADO** | DAG de Airflow con `MERGE` incremental, recreación de la tabla agregada y máximo una ejecución activa. Corrida end-to-end exitosa. |
+| 5 | Notificar ejecuciones en Slack | **FINALIZADO** | Notificaciones de éxito entregadas y comprobadas para las tareas del DAG. |
+| 6 | Exportar los resultados a S3 | **FINALIZADO** | Tres tablas exportadas a Parquet/Snappy en una corrida manual; objetos verificados en S3 y retención configurada. |
 
 ## Arquitectura
 
-```text
-Dataset Meetup → stage Snowflake → RAW_DATA (9 tablas)
-                                 → STAGING (grupos y eventos limpios)
-                                 → AUX (resumen por ciudad y categoría)
-                                 → Airflow (cada 15 min) + alertas Slack
-                                 → S3 (snapshots Parquet; retención de 30 días)
+```mermaid
+flowchart LR
+    CSV["9 CSV de Meetup"] -->|carga controlada| STAGE["Snowflake stage"]
+    STAGE --> RAW["RAW_DATA<br/>9 tablas"]
+    RAW --> DAG["Airflow<br/>cada 15 min"]
+    DAG -->|MERGE| EVENTS["STAGING.EVENTS_CLEAN"]
+    RAW --> GROUPS["STAGING.GROUPS_CLEAN"]
+    EVENTS --> AUX["AUX.GROUPS_BY_CITY_CATEGORY"]
+    GROUPS --> AUX
+    DAG -->|éxito de tarea| SLACK["Slack"]
+    EVENTS --> EXPORT["Exportación Parquet<br/>compresión Snappy"]
+    GROUPS --> EXPORT
+    AUX --> EXPORT
+    EXPORT --> S3["Amazon S3 privado<br/>snapshots por ejecución"]
 ```
 
-Las capas viven en la base configurada en Snowflake. En la base de prueba `RAPPI_MEETUP_TEST`:
+El diagrama representa el flujo lógico; Airflow coordina las transformaciones, mientras que Snowflake escribe los archivos al stage de S3 mediante una integración de roles IAM. No se guardan claves AWS en el DAG ni en el repositorio.
+
+## Evidencia de cumplimiento
+
+La siguiente matriz conecta cada requisito con su evidencia y ubicación para facilitar la revisión:
+
+| Punto | Evidencia de validación | Dónde revisar |
+|---:|---|---|
+| 1 | Prueba de conexión a Snowflake y contexto de rol, base, esquema y warehouse correctos. | Configuración local de Snowflake/Airflow; las credenciales no se publican. |
+| 2 | Conteos de las nueve tablas RAW y estrategia de carga con `ON_ERROR = 'ABORT_STATEMENT'`. | [Validación RAW](#validación-de-la-carga-raw) y [sql/03_create_and_load_raw.sql](./sql/03_create_and_load_raw.sql). |
+| 3 | Conteos de grupos, eventos y agregación; revisión de IDs y relaciones. | [Resultados analíticos](#resultados-analíticos) y [sql/05_create_auxiliary_tables.sql](./sql/05_create_auxiliary_tables.sql). |
+| 4 | Corrida manual con cuatro tareas en `success`; una ejecución confirmó IDs únicos. | [DAG de Airflow](#dag-meetup_incremental_etl) y [dags/meetup_incremental_etl.py](./dags/meetup_incremental_etl.py). |
+| 5 | Mensajes de éxito recibidos en el canal configurado. | [Alertas de Slack](#alertas-en-slack). El webhook permanece en la conexión local de Airflow. |
+| 6 | Tres archivos Parquet comprobados en S3, uno por tabla, y regla de retención de 30 días. | [Exportación a S3](#exportación-a-amazon-s3-punto-6). Los nombres de bucket y datos de acceso se omiten intencionalmente. |
+
+## Competencias que demuestra el proyecto
+
+- **Ingesta confiable:** manejo de nueve archivos CSV, incluidos archivos de hasta 1.2 GB, con validación de conteos y una estrategia de publicación que evita sustituir RAW con cargas incompletas.
+- **Modelado y calidad de datos:** capas RAW/STAGING/AUX, limpieza de tipos, tratamiento de IDs alfanuméricos y comprobaciones de unicidad y relaciones.
+- **SQL incremental y orquestación:** `MERGE`, actualización de tabla agregada y coordinación secuencial con Airflow y Docker Compose.
+- **Integración cloud con controles de acceso:** exportación directa de Snowflake a S3 mediante roles IAM, bucket privado y permisos acotados; sin claves AWS en el código.
+- **Operación y costos:** notificaciones de éxito a Slack, ejecución limitada a una activa, snapshots por corrida y retención automática de 30 días.
+
+### Resultados analíticos
+
+Conteos validados en la carga inicial:
 
 | Esquema | Contenido | Filas validadas en la carga inicial |
 |---|---|---:|
-| `RAW_DATA` | Datos originales de los nueve CSV | Conteos abajo |
 | `STAGING.GROUPS_CLEAN` | Grupos tipados y enriquecidos con ciudad/categoría | 16,330 |
 | `STAGING.EVENTS_CLEAN` | Eventos tipados (IDs alfanuméricos conservados como texto) | 5,807 |
 | `AUX.GROUPS_BY_CITY_CATEGORY` | Métricas de grupos y eventos por ciudad/categoría | 129 |
@@ -65,7 +99,7 @@ python scripts/run_sql.py --connection meetup_test_etl_conn --file sql/03_create
 python scripts/run_sql.py --connection meetup_test_etl_conn --file sql/05_create_auxiliary_tables.sql
 ```
 
-El rol necesita permisos de uso en la base de datos y warehouse y permisos para crear los objetos en `RAW_DATA`, `STAGING` y `AUX`. Para una instalación nueva, un administrador debe crear/conceder acceso a la base y permitir `CREATE SCHEMA` al rol ETL. La conexión real usada para validar fue `meetup_test_etl_conn` (`SVC_ETL` / `ETL_ROLE`); su configuración y clave privada son locales y no forman parte del repositorio.
+El rol necesita permisos de uso en la base de datos y warehouse y permisos para crear los objetos en `RAW_DATA`, `STAGING` y `AUX`. Para una instalación nueva, un administrador debe crear/conceder acceso a la base y permitir `CREATE SCHEMA` al rol ETL. La conexión de validación se configuró localmente; su identificador de cuenta, usuario y clave no forman parte de esta documentación ni del repositorio.
 
 Los scripts `01`–`03` preparan el stage, suben los CSV y cargan las tablas RAW. El script `05` crea las tres tablas analíticas; al repetirse, las reemplaza sin modificar RAW. El script `04_fix_encoding_and_reload.sql` es una reparación específica para cargas anteriores, no parte del flujo normal.
 
@@ -115,7 +149,7 @@ _PIP_ADDITIONAL_REQUIREMENTS=apache-airflow-providers-snowflake apache-airflow-p
 AIRFLOW_SNOWFLAKE_KEY_PATH=<ruta absoluta a rsa_key.p8>
 ```
 
-En macOS, por ejemplo, `AIRFLOW_SNOWFLAKE_KEY_PATH=/Users/<usuario>/.snowflake/keys/rsa_key.p8`. La clave privada debe corresponder a una clave pública registrada en Snowflake para `SVC_ETL`; no la guardes en el repositorio. Compose la monta como solo lectura en `/opt/airflow/keys/svc_etl_mac.p8`.
+En macOS, por ejemplo, `AIRFLOW_SNOWFLAKE_KEY_PATH=/Users/<usuario>/.snowflake/keys/rsa_key.p8`. La clave privada debe corresponder a una clave pública registrada para el usuario de servicio de Snowflake; no la guardes en el repositorio. Compose la monta como solo lectura dentro de los contenedores.
 
 Inicia los servicios:
 
@@ -123,46 +157,32 @@ Inicia los servicios:
 docker compose up -d
 ```
 
-Abre `http://localhost:8080` (usuario y contraseña por defecto `airflow`; solo para desarrollo local). En **Admin → Connections**, configura:
+Abre `http://localhost:8080` (usuario y contraseña por defecto `airflow`; solo para desarrollo local). En **Admin → Connections**, configura `snowflake_default` con los datos de cuenta, rol, base, warehouse y usuario de servicio de tu entorno. Configura la clave privada mediante la ruta local montada en el contenedor. No copies credenciales reales en el README, el DAG o capturas públicas.
 
-1. La conexión `snowflake_default` de tipo **Snowflake**: login `SVC_ETL`, esquema `RAW_DATA`, sin contraseña y los siguientes valores en **Extra**:
+Configura también `slack_connection` como **Slack Incoming Webhook**. Guarda el webhook únicamente en la conexión local de Airflow; nunca lo incluyas en `.env` versionado, el DAG ni capturas públicas.
 
-   ```json
-   {
-     "account": "KPMVEXI-LE96351",
-     "warehouse": "SNOWFLAKE_LEARNING_WH",
-     "database": "RAPPI_MEETUP_TEST",
-     "role": "ETL_ROLE",
-     "authenticator": "SNOWFLAKE_JWT",
-     "private_key_file": "/opt/airflow/keys/svc_etl_mac.p8"
-   }
-   ```
+Antes de habilitar el DAG, valida la conexión Snowflake con una consulta de solo lectura desde Airflow y confirma el contexto esperado para tu entorno. En la interfaz de Airflow, despausa `meetup_incremental_etl` para permitir las ejecuciones cada 15 minutos; pausa el DAG para detenerlas.
 
-2. La conexión `slack_connection` de tipo **Slack Incoming Webhook**, con el token/ruta parcial del webhook almacenado en el campo correspondiente de la conexión. Mantén el webhook privado; no lo incluyas en `.env` versionado, el DAG ni capturas públicas.
-
-Antes de habilitar el DAG, valida la conexión Snowflake con una consulta de solo lectura desde Airflow y confirma el contexto `SVC_ETL`, `ETL_ROLE`, `RAPPI_MEETUP_TEST`, `RAW_DATA` y `SNOWFLAKE_LEARNING_WH`. En la interfaz de Airflow, despausa `meetup_incremental_etl` para permitir las ejecuciones cada 15 minutos; pausa el DAG para detenerlas.
-
-Las tareas originales `simulate_new_data`, `refresh_staging_events` y `refresh_aux_table` se ejecutaron con éxito; los mensajes correspondientes llegaron a Slack. Conserva capturas de la vista de ejecuciones y del canal como evidencia de la prueba.
+Las tareas originales `simulate_new_data`, `refresh_staging_events` y `refresh_aux_table` se ejecutaron con éxito; los mensajes correspondientes llegaron a Slack. No se incluyen capturas del canal ni de Airflow en este repositorio.
 
 ## Exportación a Amazon S3 (Punto 6)
 
 Snowflake exporta las tablas procesadas directamente a Amazon S3 mediante una integración de almacenamiento IAM, sin claves AWS en Airflow ni en el repositorio:
 
-- Bucket privado: `meetup-etl-rappi`, región AWS `us-east-2` (Ohio), con acceso público bloqueado y cifrado predeterminado.
-- Prefijo permitido por Snowflake: `s3://meetup-etl-rappi/exports/meetup/`.
-- El rol IAM `MeetupSnowflakeExportRole` tiene una política limitada al prefijo de exportación y una relación de confianza con el principal y external ID generados por `MEETUP_S3_INT`.
-- La integración Snowflake `MEETUP_S3_INT` está permitida para `ETL_ROLE`; el stage externo `RAPPI_MEETUP_TEST.AUX.MEETUP_S3_STAGE` referencia el prefijo S3.
+- Bucket privado en AWS `us-east-2` (Ohio), con acceso público bloqueado y cifrado predeterminado.
+- La integración de almacenamiento usa un rol IAM con acceso limitado al prefijo de exportación y una relación de confianza configurada según Snowflake.
+- Un stage externo Snowflake referencia el prefijo S3 permitido para el rol ETL.
 - `COPY INTO` escribe Parquet con compresión Snappy. La prueba de integración creó un archivo de validación en S3 antes de habilitar la exportación de las tablas.
 
 Al terminar `refresh_aux_table`, la tarea `export_processed_tables` exporta `STAGING.GROUPS_CLEAN`, `STAGING.EVENTS_CLEAN` y `AUX.GROUPS_BY_CITY_CATEGORY`. Cada ejecución escribe bajo un directorio único:
 
 ```text
-s3://meetup-etl-rappi/exports/meetup/snapshots/<fecha>/<run_id>/<tabla>/
+s3://<bucket-privado>/<prefijo>/snapshots/<fecha>/<run_id>/<tabla>/
 ```
 
 La regla de ciclo de vida del bucket expira los objetos actuales bajo `exports/meetup/snapshots/` después de 30 días. No aplica al prefijo `_validation/`. Al ejecutarse el DAG cada 15 minutos, una exportación completa puede producir hasta 96 snapshots al día; el formato Parquet comprimido reduce su tamaño, pero el almacenamiento, las solicitudes S3 y el cómputo Snowflake tienen costo. Supervisa el consumo y pausa el DAG si deseas detener nuevas exportaciones.
 
-La integración se validó primero mediante una exportación Parquet pequeña a `_validation/`; el objeto `data_0_0_0.snappy.parquet` apareció en el bucket. Después, una corrida manual completa del DAG terminó en `success` y exportó las tres tablas procesadas; se verificaron tres archivos Parquet en S3 (uno por tabla en esa ejecución). No almacenes ni publiques el external ID de Snowflake, políticas con datos de cuenta, tokens de Slack ni claves privadas.
+La integración se validó primero mediante una exportación Parquet pequeña; después, una corrida manual completa del DAG terminó en `success` y exportó las tres tablas procesadas. Se verificó un archivo Parquet por tabla en S3. No almacenes ni publiques el external ID de Snowflake, identificadores de cuenta, políticas IAM con datos de cuenta, tokens de Slack ni claves privadas.
 
 ### Evidencia de validación
 
@@ -175,13 +195,7 @@ La corrida manual completa `manual__2026-10-09T15:55:19+00:00` terminó correcta
 | `refresh_aux_table` | `success` |
 | `export_processed_tables` | `success` |
 
-Se verificaron los tres objetos Parquet de esa corrida en:
-
-```text
-s3://meetup-etl-rappi/exports/meetup/snapshots/2026-10-09/manual__2026-10-09T15-55-19_00-00/
-```
-
-La regla de ciclo de vida retiene los objetos del prefijo `snapshots/` durante 30 días. Para la entrega final, se recomienda guardar capturas sanitizadas de (1) la vista de Airflow con las cuatro tareas exitosas, (2) los tres objetos bajo el prefijo anterior en S3 y (3) los mensajes de éxito correspondientes en Slack. No incluyas claves, tokens, external IDs, contraseñas ni información sensible de la cuenta en las capturas. Las capturas no se incrustan en este README; el texto anterior registra el resultado reproducible sin añadir imágenes grandes al repositorio.
+La regla de ciclo de vida retiene los objetos del prefijo `snapshots/` durante 30 días. Las capturas no se incluyen: no se publicaron imágenes verificables en el repositorio. Si se agregan para una entrega, deben sanitizarse para ocultar claves, tokens, external IDs, contraseñas e identificadores de cuenta.
 
 ## Estructura
 
@@ -194,7 +208,16 @@ logs/      Logs de ejecución (no versionados)
 dags/      DAGs de Apache Airflow para orquestación incremental
 ```
 
-## Próximas etapas
+## Seguridad y alcance de la evidencia
 
-1. Exportar resultados a S3 mediante una integración de almacenamiento segura.
-2. Adjuntar evidencias de ejecución y completar la entrega.
+- No hay credenciales, claves privadas, tokens de webhook, external IDs ni valores reales de conexión en el README.
+- Las conexiones Snowflake y Slack, la clave RSA y las rutas locales se configuran fuera de Git. La clave se monta en Docker como solo lectura.
+- El bucket permanece privado; Snowflake accede mediante una integración de roles IAM y permisos acotados al prefijo requerido.
+- Los resultados se describen con evidencia de ejecuciones realizadas. Las capturas no están publicadas, así que la revisión puede reproducir las validaciones con las instrucciones y scripts del repositorio.
+
+## Alcance y decisiones de ingeniería
+
+- La carga RAW usa tablas de preparación y `SWAP`, evitando publicar una carga incompleta; los errores de filas no se ignoran silenciosamente.
+- Las transformaciones conservan IDs alfanuméricos y evitan duplicar eventos en la actualización incremental.
+- La simulación del DAG modifica la tabla RAW para demostrar cambios periódicos; está identificada como sintética y puede pausarse desde Airflow.
+- Las exportaciones separan cada corrida y usan Parquet/Snappy. La retención acota almacenamiento; las ejecuciones frecuentes generan costo en S3 y Snowflake.
